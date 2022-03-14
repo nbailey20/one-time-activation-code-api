@@ -4,16 +4,27 @@ Description: |
   
   1. Encrypted S3 bucket to store downloadable file and codebank file with list of valid/expired download codes
   2. API Gateway REST API with public endpoint that listens for incoming requests and forwards to Python script
-    2.5 Endpoint to add new codes to codebank upon game purchase locked down to specific IP/certificate for security** TBD
-  3. Lambda function (Python script) to check codebank against provided code and conditionally redirect clients to download game file
+  3. API Gateway REST API with IP-restricted endpoint to add new codes to codebank upon game purchase 
+  4. Lambda function (Python script) to check codebank against provided code
+  5. Lambda function to generate new random code and add to codebank
 
-  Last Updated: 2/8/22
+  Last Updated: 3/13/22
 
 
 Parameters:
-  GameFileName:
+  AddCodeIp: 
     Type: String
-    Description: Name of game file to download, including extension
+    Description: IP address or subnet allowed to call the AddCode API
+
+  CheckCodeApiBurstLimit:
+    Type: Number
+    Description: Number of concurrent requests allowed to API before sending 429 Too Many Requests
+    Default: 10
+
+  CheckCodeApiRateLimit:
+    Type: Number
+    Description: Number of requests per second allowed to API before sending 429 Too Many Requests
+    Default: 10
 
   PathName:
     Type: String 
@@ -23,36 +34,112 @@ Parameters:
 
 
 Outputs:
-  ApiUrl:
-    Description: URL of API
-    Value: !Sub https://${DownloadGameApi}.execute-api.${AWS::Region}.amazonaws.com/${PathName}/
+  CheckCodeApiUrl:
+    Description: URL of CheckCode API
+    Value: !Sub https://${CheckCodeApi}.execute-api.${AWS::Region}.amazonaws.com/${PathName}/
+  
+  AddCodeApiUrl:
+    Description: URL of AddCode API
+    Value: !Sub https://${AddCodeApi}.execute-api.${AWS::Region}.amazonaws.com/${PathName}/
   
   
 
 Resources:
-  DownloadGameApi:
+  AddCodeApi:
     Type: AWS::ApiGateway::RestApi
     Properties:
-      Name: download-game-api
+      Name: add-code-api
       BinaryMediaTypes: 
         - "*~1*"
-      Description: API to validate one-time code and redirect to game file
+      Description: API to generate and add one-time code to codebank S3 bucket
+      EndpointConfiguration: 
+        Types:
+          - REGIONAL
+      Policy:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal: "*"
+          Action:
+          - "execute-api:Invoke"
+          Resource:
+          - "execute-api:/*"
+        - Effect: Deny
+          Principal: "*"
+          Action: "execute-api:Invoke"
+          Resource: "execute-api:/*"
+          Condition:
+            NotIpAddress:
+              aws:SourceIp: [!Ref AddCodeIp]
+
+
+  AddCodeApiResource:
+    Type: AWS::ApiGateway::Resource
+    Properties: 
+      ParentId: !GetAtt 
+        - AddCodeApi
+        - RootResourceId
+      PathPart: "{proxy+}"
+      RestApiId: !Ref AddCodeApi
+
+  
+  AddCodeApiMethod:
+    Type: AWS::ApiGateway::Method
+    Properties: 
+      AuthorizationType: NONE
+      HttpMethod: GET
+      Integration: 
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub >-    ## yes this date should be hardcoded, from docs
+          arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${AddCodeLambdaFunction.Arn}/invocations
+      ResourceId: !Ref AddCodeApiResource
+      RestApiId: !Ref AddCodeApi
+
+
+
+  AddCodeApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    Properties: 
+      RestApiId: !Ref AddCodeApi
+      StageName: !Ref PathName
+    DependsOn: AddCodeApiMethod
+    
+  
+  AddCodeLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties: 
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt AddCodeLambdaFunction.Arn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${AddCodeApi}/*/GET/*
+
+
+
+
+  CheckCodeApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: check-code-api
+      BinaryMediaTypes: 
+        - "*~1*"
+      Description: API to validate one-time code
       EndpointConfiguration: 
         Types:
           - REGIONAL
 
 
-  DownloadGameApiResource:
+  CheckCodeApiResource:
     Type: AWS::ApiGateway::Resource
     Properties: 
       ParentId: !GetAtt 
-        - DownloadGameApi
+        - CheckCodeApi
         - RootResourceId
       PathPart: "{proxy+}"
-      RestApiId: !Ref DownloadGameApi
+      RestApiId: !Ref CheckCodeApi
 
   
-  DownloadGameApiMethod:
+  CheckCodeApiMethod:
     Type: AWS::ApiGateway::Method
     Properties: 
       AuthorizationType: NONE
@@ -61,78 +148,45 @@ Resources:
         Type: AWS_PROXY
         IntegrationHttpMethod: POST
         Uri: !Sub >-
-          arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${DownloadGameLambdaFunction.Arn}/invocations
-      ResourceId: !Ref DownloadGameApiResource
-      RestApiId: !Ref DownloadGameApi
+          arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${CheckCodeLambdaFunction.Arn}/invocations
+      ResourceId: !Ref CheckCodeApiResource
+      RestApiId: !Ref CheckCodeApi
 
 
 
-  DownloadGameApiDeployment:
+  CheckCodeApiDeployment:
     Type: AWS::ApiGateway::Deployment
     Properties: 
-      RestApiId: !Ref DownloadGameApi
+      RestApiId: !Ref CheckCodeApi
       StageName: !Ref PathName
-    DependsOn: DownloadGameApiMethod
+      StageDescription:
+        ThrottlingBurstLimit: !Ref CheckCodeApiBurstLimit
+        ThrottlingRateLimit: !Ref CheckCodeApiRateLimit
+    DependsOn: CheckCodeApiMethod
     
   
-  DownloadGameLambdaPermission:
+  CheckCodeLambdaPermission:
     Type: AWS::Lambda::Permission
     Properties: 
       Action: lambda:InvokeFunction
-      FunctionName: !GetAtt DownloadGameLambdaFunction.Arn
+      FunctionName: !GetAtt CheckCodeLambdaFunction.Arn
       Principal: apigateway.amazonaws.com
-      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${DownloadGameApi}/*/GET/*
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${CheckCodeApi}/*/GET/*
 
 
-  OneTimeDownloadS3Bucket:
+  OneTimeCodeS3Bucket:
     Type: AWS::S3::Bucket
     DeletionPolicy: Delete
     Properties:
-      BucketName: !Sub one-time-download-${AWS::Region}-${AWS::AccountId}
+      BucketName: !Sub codebank-${AWS::Region}-${AWS::AccountId}
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - BucketKeyEnabled: False 
             ServerSideEncryptionByDefault:
               SSEAlgorithm: AES256
 
-
-
-  ## Need IAM user since role-based presigned URLs expire when script ends (role no longer assumed)
-  DownloadGameLambdaIamUser:
-    Type: AWS::IAM::User
-    Properties: 
-      Policies: 
-        - PolicyName: download-game-s3-perms
-          PolicyDocument: 
-            Version: '2012-10-17'
-            Statement:
-            - Effect: Allow 
-              Action:
-              - "s3:ListBucket"
-              Resource:
-              - !GetAtt OneTimeDownloadS3Bucket.Arn
-            - Effect: Allow 
-              Action:
-              - "s3:GetObject"
-              Resource:
-              - !Sub ${OneTimeDownloadS3Bucket.Arn}/${GameFileName}
-              - !Sub ${OneTimeDownloadS3Bucket.Arn}/codebank.json
-            - Effect: Allow 
-              Action:
-              - "s3:PutObject"
-              Resource:
-              - !Sub ${OneTimeDownloadS3Bucket.Arn}/codebank.json
-      UserName: download-game-lambda-iam-user
-
-
-  DownloadGameLambdaIamAccessKey:
-    Type: AWS::IAM::AccessKey
-    Properties:
-      UserName:
-        !Ref DownloadGameLambdaIamUser
-
   
-  DownloadGameLambdaIamRole:
+  LambdaIamRole:
     Type: AWS::IAM::Role
     Properties: 
       AssumeRolePolicyDocument: 
@@ -146,7 +200,7 @@ Resources:
               - 'sts:AssumeRole'
       Description: Basic Execution role for Lambda
       Policies: 
-        - PolicyName: basic-lamda-execution
+        - PolicyName: lambda-logging
           PolicyDocument: 
             Version: '2012-10-17'
             Statement:
@@ -161,31 +215,45 @@ Resources:
               - "logs:PutLogEvents"
               Resource:
               - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*:*
-      RoleName: DownloadGameLambdaIamRole
+        - PolicyName: codebank-s3-perms
+          PolicyDocument: 
+            Version: '2012-10-17'
+            Statement:
+            - Effect: Allow 
+              Action:
+              - "s3:ListBucket"
+              Resource:
+              - !GetAtt OneTimeCodeS3Bucket.Arn
+            - Effect: Allow 
+              Action:
+              - "s3:GetObject"
+              Resource:
+              - !Sub ${OneTimeCodeS3Bucket.Arn}/codebank.json
+            - Effect: Allow 
+              Action:
+              - "s3:PutObject"
+              Resource:
+              - !Sub ${OneTimeCodeS3Bucket.Arn}/codebank.json
+      RoleName: LambdaIamRole
 
 
 
-  DownloadGameLambdaFunction:
+  CheckCodeLambdaFunction:
     Type: AWS::Lambda::Function
     Properties:
       Runtime: python3.8
       Handler: index.lambda_handler
-      Role: !GetAtt DownloadGameLambdaIamRole.Arn
-      Description: Implement One-Time Download logic
+      Role: !GetAtt LambdaIamRole.Arn
+      Description: Implement One-Time Code Validation logic
       Timeout: 15
       Environment:
         Variables:
-          access_key_id: !Ref DownloadGameLambdaIamAccessKey
-          secret_access_key: !GetAtt DownloadGameLambdaIamAccessKey.SecretAccessKey
-          download_bucket: !Ref OneTimeDownloadS3Bucket
-          game_file_name: !Ref GameFileName
-          region: !Sub ${AWS::Region}
+          download_bucket: !Ref OneTimeCodeS3Bucket
       Code:
         ZipFile: |
           import boto3
           from botocore.exceptions import ClientError
-          from botocore.client import Config
-          import os, json, logging, sys
+          import os, json, logging
 
 
 
@@ -195,43 +263,46 @@ Resources:
           }
 
           EXPIRED_DOWNLOAD_CODE = {
-              "statusCode": 403,
+              "statusCode": 405,
               "body": "Expired download code."
           }
 
+          VALID_DOWNLOAD_CODE = {
+              "statusCode": 201,
+              "body": "Valid download code."
+          }
+
           UNKNOWN_ERROR = {
-              "statusCode": 404,
-              "body": "Unexpected request."
+              "statusCode": 503,
+              "body": "Internal failure."
           }
 
-          SUCCESS_CODE_ADD = {
-              "statusCode": 200,
-              "body": "New code added."
-          }
 
-          INVALID_CODE_ADD = {
-              "statusCode": 403,
-              "body": "Code is either expired or already active."
-          }
+          CODEBANK_FILE_NAME = 'codebank.json'
 
 
           ## Wrapper around AWS library methods to read/write to/from file in storage using provided API client
           ## If no codebank exists (first execution), create new one
-          ## Returns codebank if action == read, otherwise writes provided codebank_data to storage if action == write
-          def read_write_codebank(action, s3_client, codebank_name, bucket, codebank_data=None):
+          ## Returns codebank if action == read, otherwise False
+          ## If action == write, returns True or False depending on success
+          def read_write_codebank(action, s3_object, codebank_data=None):
+
               if action == 'read':
+                  ## Get object from storage
                   try:
-                      res = s3_client.get_object(Bucket=bucket, Key=codebank_name)
+                      res = s3_object.get()
                       file_content = res['Body'].read().decode('utf-8')
                       logging.info('Successfully retrieved codebank from storage')
+
                   except ClientError as e:
                       if e.response['Error']['Code'] == 'NoSuchKey':
                           logging.info('First-time setup detected, creating empty codebank')
                           file_content = '{"unused_codes": [], "expired_codes": []}'
                       else:
                           logging.error(f'Could not retrieve codebank, exiting: {e}')
-                          sys.exit(3)
-                      
+                          return False
+                  
+                  ## Load object content
                   try:
                       codebank = json.loads(file_content)
                       logging.info('Successfully parsed codebank')
@@ -239,162 +310,265 @@ Resources:
 
                   except:
                       logging.error('Could not read codebank, exiting')
-                      sys.exit(3)
+                      return False
+
 
               elif action == 'write':
+                  ## Write object back to storage
                   try:
-                      s3_client.put_object(
-                          Bucket=bucket, 
-                          Key=codebank_name, 
+                      s3_object.put(
                           Body=(bytes(json.dumps(codebank_data).encode('utf-8')))
                       )
                       logging.info('Successfully wrote updated codebank to storage')
-                      return
+                      return True
 
                   except ClientError as e:
                       logging.error(f'Could not write codebank to storage, exiting: {e}')
-                      sys.exit(3)
-
-
-
-
-          ## Adds new code to codebank and saves to storage
-          ## Returns False if code already known, True if successfully added
-          def add_new_code(s3_client, codebank_name, bucket, codebank_data, path):
-              try:
-                  new_code = path.split('/add_code=')[1]
-              except:
-                  logging.error('Could not parse code to add from URL query, exiting')
-                  return UNKNOWN_ERROR
-
-              if new_code in codebank_data['expired_codes'] or new_code in codebank_data['unused_codes']:
-                  logging.info(f'Requestor tried to add previously seen code {new_code}, aborting add')
-                  return INVALID_CODE_ADD
-
-              codebank_data['unused_codes'].append(new_code)
-              logging.info(f'Successfully added new code {new_code} to codebank')
-              read_write_codebank('write', s3_client, codebank_name, bucket, codebank_data=codebank_data)
-              return SUCCESS_CODE_ADD
+                      return False
 
 
 
           ## Changes codebank code from unused to expired, 
           ## Returns False if code already expired, otherwise updated codebank
-          def expire_used_code(codebank_data, code):
-              if code in codebank_data['expired_codes']:
+          def expire_used_code(codebank, code):
+              if code in codebank['expired_codes']:
                   logging.info(f'Code {code} is already expired, aborting')
                   return False
 
-              codebank_data['expired_codes'].append(code)
-              codebank_data['unused_codes'].remove(code)
+              codebank['expired_codes'].append(code)
+              codebank['unused_codes'].remove(code)
               logging.info(f'Changing code {code} to expired')
-              return codebank_data
+              return codebank
 
 
 
           ## Checks provided code against unused_codes in codebank and sets value to expired if match
-          ## Returns True if valid code was provided and marked expired in codebank
-          ## Returns INVALID/EXPIRED Download Code HTTP response if not valid code
-          def activate_code(input_code, s3_client, codebank_name, bucket, codebank_data):
-              for valid_code in codebank_data['unused_codes']:
-                  if input_code == valid_code:
-                      updated_codebank = expire_used_code(codebank_data, valid_code)
+          ## Returns appropriate HTTP response for given code
+          def check_code(input_code, codebank_object):
+              codebank = read_write_codebank('read', codebank_object)
 
-                      if not updated_codebank:
-                          return EXPIRED_DOWNLOAD_CODE
+              if input_code in codebank['expired_codes']:
+                  return EXPIRED_DOWNLOAD_CODE
 
-                      read_write_codebank('write', s3_client, codebank_name, bucket, codebank_data=updated_codebank)
-                      return True
+              if input_code in codebank['unused_codes']:
+                  updated_codebank = expire_used_code(codebank, input_code)
+
+                  if not updated_codebank:
+                      return UNKNOWN_ERROR
+
+                  read_write_codebank('write', codebank_object, codebank_data=updated_codebank)
+                  return VALID_DOWNLOAD_CODE
 
               return INVALID_DOWNLOAD_CODE
 
 
-          ## Parses input code from URL path, returns HTTP 302 response to S3 presigned URL if valid
-          ## Returns 403 response if invalid/expired code
-          def download_game_file(s3_client, codebank_name, bucket, codebank_data, path, game_file):
-              try:
-                  input_code = path[1:] ## strip leading /
-              except:
-                  logging.error('Could not parse provided code from URL, exiting')
-                  return UNKNOWN_ERROR
 
-              ## Validate / expire input code
-              activate_response = activate_code(input_code, s3_client, codebank_name, bucket, codebank_data)
-
-              if activate_response == INVALID_DOWNLOAD_CODE or activate_response == EXPIRED_DOWNLOAD_CODE:
-                  return activate_response
-
-              ## Generate URL to download game file
-              ## Expire URL in 5 seconds so it can't be reused/shared
-              try:
-                  presigned_url = s3_client.generate_presigned_url(
-                      'get_object', 
-                      Params={'Bucket': bucket, 'Key': game_file},
-                      ExpiresIn=5
-                  )
-              except ClientError as e:
-                  logging.error(f'Could not generate URL for game file even though valid code was provided, exiting: {e}')
-                  sys.exit(4)
-
-              
-              ## Redirect validated requestor to temporary game file URL
-              validated_redirect = {
-                  "statusCode": 302,
-                  "headers": {
-                      "Location": presigned_url,
-                  }
-              }
-              return validated_redirect
-
-
-
-
-
-          ## Example API usage: <apidomain>.amazonaws.com/12345 for downloading gamefile with code '12345'
-          ##   <apidomain>.amazonaws.com/add_code=67890 for adding new code '67890' to codebank
+          ## Example API usage: <apidomain>.amazonaws.com/12345 to validate code '12345'
           ##
           ## Codebank format: {'unused_codes': [], 'expired_codes': []}
           def lambda_handler(event, _):
               logging.getLogger().setLevel(logging.INFO)
 
+              logging.info(f'Invoked CheckCode API with event: {event}')
+
 
               ## Get environment variables needed for script
               try:
-                  access_key_id = os.environ['access_key_id']
-                  secret_access_key = os.environ['secret_access_key']
                   bucket = os.environ['download_bucket']
-                  file_name = os.environ['game_file_name']
-                  codebank_name = 'codebank.json'
-                  region = os.environ['region']
+                  codebank_name = CODEBANK_FILE_NAME
               except:
                   logging.error('Could not retrieve environment variables needed for script, exiting')
-                  sys.exit(1)
+                  return UNKNOWN_ERROR
               
 
               ## Create AWS storage API client with Lambda user creds to interact with codebank/game files
               try:
-                  lambda_user_session = boto3.Session(aws_access_key_id=access_key_id, 
-                                                      aws_secret_access_key=secret_access_key, 
-                                                      region_name=region
-                                                      )
-                  s3_client = lambda_user_session.client('s3', config=Config(signature_version='s3v4'))
+                  s3 = boto3.resource('s3')
+                  codebank_object = s3.Object(bucket, codebank_name)
+
               except ClientError as e:
-                  logging.error(f'Could not create API client for S3 using provided user creds, exiting: {e}')
-                  sys.exit(2)
+                  logging.error(f'Could not create S3 bucket resource using IAM role, exiting: {e}')
+                  return UNKNOWN_ERROR
 
 
-              ## Read codebank data from storage
-              codebank = read_write_codebank('read', s3_client, codebank_name, bucket)
+              input_code = event['path'][1:] ## strip off leading /
+              http_response = check_code(input_code, codebank_object)
+
+              logging.info(f'Sending HTTP response {http_response}, script complete.')
+              return http_response
 
 
-              path = event['path']
 
-              ## Add request received 
-              if path.startswith('/add_code='):
-                  return add_new_code(s3_client, codebank_name, bucket, codebank, path)
 
-              ## Download request received
-              elif not path.startswith('/add_code='):
-                  http_response = download_game_file(s3_client, codebank_name, bucket, codebank, path, file_name)
-                  logging.info(f'Sending HTTP response {http_response}, script complete.')
-                  return http_response
+  AddCodeLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.8
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaIamRole.Arn
+      Description: Implement generation and adding of new codes to codebank
+      Timeout: 25
+      Environment:
+        Variables:
+          download_bucket: !Ref OneTimeCodeS3Bucket
+      Code:
+        ZipFile: |
+          import boto3
+          from botocore.exceptions import ClientError
+          import os, json, logging
+          from secrets import randbelow
+
+
+          UNKNOWN_ERROR = {
+              "statusCode": 503,
+              "body": "Internal failure"
+          }
+
+          UNKNOWN_ROUTE = {
+              "statusCode": 404,
+              "body": "Not found"
+          }
+
+          SUCCESS_CODE_ADD = {
+              "statusCode": 200,
+              "body": "New code: "
+          }
+
+          CODE_LENGTH = 20
+
+
+          ## Wrapper around AWS library methods to read/write to/from file in storage using provided API client
+          ## If no codebank exists (first execution), create new one
+          ## Returns codebank if action == read, otherwise False
+          ## If action == write, returns True or False depending on success
+          def read_write_codebank(action, s3_object, codebank_data=None):
+
+              if action == 'read':
+                  ## Get object from storage
+                  try:
+                      res = s3_object.get()
+                      file_content = res['Body'].read().decode('utf-8')
+                      logging.info('Successfully retrieved codebank from storage')
+
+                  except ClientError as e:
+                      if e.response['Error']['Code'] == 'NoSuchKey':
+                          logging.info('First-time setup detected, creating empty codebank')
+                          file_content = '{"unused_codes": [], "expired_codes": []}'
+                      else:
+                          logging.error(f'Could not retrieve codebank, exiting: {e}')
+                          return False
+                  
+                  ## Load object content
+                  try:
+                      codebank = json.loads(file_content)
+                      logging.info('Successfully parsed codebank')
+                      return codebank
+
+                  except:
+                      logging.error('Could not read codebank, exiting')
+                      return False
+
+
+              elif action == 'write':
+                  ## Write object back to storage
+                  try:
+                      s3_object.put(
+                          Body=(bytes(json.dumps(codebank_data).encode('utf-8')))
+                      )
+                      logging.info('Successfully wrote updated codebank to storage')
+                      return True
+
+                  except ClientError as e:
+                      logging.error(f'Could not write codebank to storage, exiting: {e}')
+                      return False
+
+
+
+          def generate_random_code():
+              charset = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+              charset += 'abcdefghijklmnopqrstuvwxyz'
+              charset += '0123456789'
+              charset += '_-'
+              charset = list(charset)
+              
+              num_chars = len(charset)
+              code = ''
+
+              for _ in range(CODE_LENGTH):
+                  idx = randbelow(num_chars)
+                  code += charset[idx]
+
+              return code
+
+
+
+          ## Adds new code to codebank and saves to storage
+          ## Returns HTTP response based on success
+          def add_new_code(codebank_object):
+
+              codebank = read_write_codebank('read', codebank_object)
+              if not codebank:
+                  return UNKNOWN_ERROR
+
+              ## Generate random code value that doesn't already exist in codebank
+              existing_code = True
+              while existing_code:
+                  new_code = generate_random_code()
+
+                  if new_code in codebank['expired_codes'] or new_code in codebank['unused_codes']:
+                      logging.info(f'Generated previously seen code {new_code}, trying again...')
+
+                  else:
+                      logging.info(f'Generated new valid code {new_code}')
+                      existing_code = False
+                  
+
+              ## Add new code to codebank and save
+              codebank['unused_codes'].append(new_code)
+              logging.info(f'Successfully added new code {new_code} to codebank')
+
+              successful_write = read_write_codebank('write', codebank_object, codebank_data=codebank)
+              if not successful_write:
+                  return UNKNOWN_ERROR
+
+
+              ## Provide new code back in response
+              SUCCESS_CODE_ADD['body'] += new_code
+              return SUCCESS_CODE_ADD
+
+
+
+
+          ## Example API usage: <apidomain>.amazonaws.com/generate_code
+          ##
+          ## Codebank format: {'unused_codes': [], 'expired_codes': []}
+          def lambda_handler(event, _):
+              logging.getLogger().setLevel(logging.INFO)
+
+              logging.info(f'Invoked AddCode API with event: {event}')
+
+              ## Get environment variables needed for script
+              try:
+                  bucket = os.environ['download_bucket']
+                  codebank_name = 'codebank.json'
+              except:
+                  logging.error('Could not retrieve environment variables needed for script, exiting')
+                  return UNKNOWN_ERROR
+              
+
+              ## Create AWS storage API client with Lambda user creds to interact with codebank/game files
+              try:
+                  s3 = boto3.resource('s3')
+                  codebank_object = s3.Object(bucket, codebank_name)
+
+              except ClientError as e:
+                  logging.error(f'Could not create S3 bucket resource using IAM role, exiting: {e}')
+                  return UNKNOWN_ERROR
+
+
+              ## If expected URL path, generate, save, return new valid code 
+              path = event['path'][1:] ## strip off leading /
+              if path == 'generate_code':
+                  return add_new_code(codebank_object)
+              else:
+                  return UNKNOWN_ROUTE
