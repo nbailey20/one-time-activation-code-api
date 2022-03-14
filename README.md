@@ -1,4 +1,4 @@
-# AWS-Hosted One-Time File Download API
+# AWS-Hosted One-Time Activation Code Generation & Validation APIs
 
-## Last Updated: 2/8/22
-## Version: 0.1.0
+## Last Updated: 3/13/22
+## Version: 1.0.0
