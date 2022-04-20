@@ -431,7 +431,7 @@ Resources:
 
           SUCCESS_CODE_ADD = {
               "statusCode": 200,
-              "body": "New code: "
+              "body": ""
           }
 
           CODE_LENGTH = 20
@@ -533,7 +533,7 @@ Resources:
 
 
               ## Provide new code back in response
-              SUCCESS_CODE_ADD['body'] += new_code
+              SUCCESS_CODE_ADD['body'] = new_code
               return SUCCESS_CODE_ADD
 
 

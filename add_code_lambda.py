@@ -16,7 +16,7 @@ UNKNOWN_ROUTE = {
 
 SUCCESS_CODE_ADD = {
     "statusCode": 200,
-    "body": "New code: "
+    "body": ""
 }
 
 CODE_LENGTH = 20
@@ -118,7 +118,7 @@ def add_new_code(codebank_object):
 
 
     ## Provide new code back in response
-    SUCCESS_CODE_ADD['body'] += new_code
+    SUCCESS_CODE_ADD['body'] = new_code
     return SUCCESS_CODE_ADD
 
 
