@@ -4,17 +4,17 @@ Description: |
   
   1. Encrypted S3 bucket to store downloadable file and codebank file with list of valid/expired download codes
   2. API Gateway REST API with public endpoint that listens for incoming requests and forwards to Python script
-  3. API Gateway REST API with IP-restricted endpoint to add new codes to codebank upon game purchase 
+  3. API Gateway REST API with IAM user-restricted endpoint to add new codes to codebank upon game purchase 
   4. Lambda function (Python script) to check codebank against provided code
   5. Lambda function to generate new random code and add to codebank
 
-  Last Updated: 3/13/22
+  Last Updated: 7/12/22
 
 
 Parameters:
-  AddCodeIp: 
+  AddCodeIamUserName: 
     Type: String
-    Description: IP address or subnet allowed to call the AddCode API
+    Description: Name of IAM user allowed to call the AddCode API
 
   CheckCodeApiBurstLimit:
     Type: Number
@@ -31,6 +31,11 @@ Parameters:
     Description: Text shown in URL path for API (cannot be empty) - E.g. ...com/{pathname}/<code>
     Default: v1
 
+  ResourceSuffix:
+    Type: String
+    Description: Suffix for API resource names to prevent issues recreating stack, random phrase
+    Default: "hawkeye"
+
 
 
 Outputs:
@@ -41,36 +46,63 @@ Outputs:
   AddCodeApiUrl:
     Description: URL of AddCode API
     Value: !Sub https://${AddCodeApi}.execute-api.${AWS::Region}.amazonaws.com/${PathName}/
-  
-  
+
+
 
 Resources:
+  AddCodeIamUser:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: !Sub ${AddCodeIamUserName}-${ResourceSuffix}
+      # Policies:
+      # - PolicyName: !Sub AddCodeIamUserPolicy-${ResourceSuffix}
+      #   PolicyDocument:
+      #     Version: '2012-10-17'
+      #     Statement:
+      #     - Effect: Allow
+      #       Action:
+      #         - "execute-api:Invoke"
+      #       Resource:
+      #         - !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${AddCodeApi}/*/GET/*"
+
+  AddCodeIamPolicy:
+    Type: AWS::IAM::Policy
+    Properties: 
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Action:
+            - "execute-api:Invoke"
+          Resource:
+            - !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${AddCodeApi}/*/GET/*"
+      PolicyName: !Sub AddCodeIamUserPolicy-${ResourceSuffix}
+      Users: 
+        - !Ref AddCodeIamUser
+
+
   AddCodeApi:
     Type: AWS::ApiGateway::RestApi
     Properties:
-      Name: add-code-api
+      Name: !Sub add-code-api-${ResourceSuffix}
       BinaryMediaTypes: 
         - "*~1*"
       Description: API to generate and add one-time code to codebank S3 bucket
       EndpointConfiguration: 
         Types:
           - REGIONAL
+      ## Implicit deny for all but expected IAM user
       Policy:
         Version: '2012-10-17'
         Statement:
         - Effect: Allow
-          Principal: "*"
+          Principal:
+            AWS: !Sub "arn:aws:iam::${AWS::AccountId}:user/${AddCodeIamUserName}-${ResourceSuffix}"
           Action:
           - "execute-api:Invoke"
           Resource:
           - "execute-api:/*"
-        - Effect: Deny
-          Principal: "*"
-          Action: "execute-api:Invoke"
-          Resource: "execute-api:/*"
-          Condition:
-            NotIpAddress:
-              aws:SourceIp: [!Ref AddCodeIp]
+    DependsOn: AddCodeIamUser
 
 
   AddCodeApiResource:
@@ -86,7 +118,7 @@ Resources:
   AddCodeApiMethod:
     Type: AWS::ApiGateway::Method
     Properties: 
-      AuthorizationType: NONE
+      AuthorizationType: AWS_IAM
       HttpMethod: GET
       Integration: 
         Type: AWS_PROXY
@@ -119,8 +151,9 @@ Resources:
 
   CheckCodeApi:
     Type: AWS::ApiGateway::RestApi
+    ## No resource policy, public API
     Properties:
-      Name: check-code-api
+      Name: !Sub check-code-api-${ResourceSuffix}
       BinaryMediaTypes: 
         - "*~1*"
       Description: API to validate one-time code
@@ -178,7 +211,7 @@ Resources:
     Type: AWS::S3::Bucket
     DeletionPolicy: Delete
     Properties:
-      BucketName: !Sub codebank-${AWS::Region}-${AWS::AccountId}
+      BucketName: !Sub codebank-${ResourceSuffix}
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - BucketKeyEnabled: False 
@@ -200,7 +233,7 @@ Resources:
               - 'sts:AssumeRole'
       Description: Basic Execution role for Lambda
       Policies: 
-        - PolicyName: lambda-logging
+        - PolicyName: !Sub lambda-logging-${ResourceSuffix}
           PolicyDocument: 
             Version: '2012-10-17'
             Statement:
@@ -234,7 +267,7 @@ Resources:
               - "s3:PutObject"
               Resource:
               - !Sub ${OneTimeCodeS3Bucket.Arn}/codebank.json
-      RoleName: LambdaIamRole
+      RoleName: !Sub LambdaIamRole-${ResourceSuffix}
 
 
 
