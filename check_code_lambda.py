@@ -19,13 +19,18 @@ VALID_DOWNLOAD_CODE = {
     "body": "Valid download code."
 }
 
+UNKNOWN_ROUTE = {
+    "statusCode": 404,
+    "body": "Not found"
+}
+
 UNKNOWN_ERROR = {
     "statusCode": 503,
     "body": "Internal failure."
 }
 
 
-CODEBANK_FILE_NAME = 'codebank.json'
+CODEBANK_FILE_SUFFIX = 'codebank.json'
 
 
 ## Wrapper around AWS library methods to read/write to/from file in storage using provided API client
@@ -42,12 +47,8 @@ def read_write_codebank(action, s3_object, codebank_data=None):
             logging.info('Successfully retrieved codebank from storage')
 
         except ClientError as e:
-            if e.response['Error']['Code'] == 'NoSuchKey':
-                logging.info('First-time setup detected, creating empty codebank')
-                file_content = '{"unused_codes": [], "expired_codes": []}'
-            else:
-                logging.error(f'Could not retrieve codebank, exiting: {e}')
-                return False
+            logging.error(f'Could not retrieve codebank, exiting: {e}')
+            return False
         
         ## Load object content
         try:
@@ -118,17 +119,24 @@ def lambda_handler(event, _):
 
     logging.info(f'Invoked CheckCode API with event: {event}')
 
+    ## Expected path: /<version>/<inputcode>
+    path = event['path']
+    try:
+        version, input_code = path.split('/')[1:] ## strip off leading /
+    except:
+        logging.error(f'Received unexpected URL path, exiting: {path}')
+        return UNKNOWN_ROUTE
 
     ## Get environment variables needed for script
     try:
         bucket = os.environ['download_bucket']
-        codebank_name = CODEBANK_FILE_NAME
     except:
         logging.error('Could not retrieve environment variables needed for script, exiting')
         return UNKNOWN_ERROR
     
 
     ## Create AWS storage API client with Lambda user creds to interact with codebank/game files
+    codebank_name = f'{version}-{CODEBANK_FILE_SUFFIX}'
     try:
         s3 = boto3.resource('s3')
         codebank_object = s3.Object(bucket, codebank_name)
@@ -137,9 +145,7 @@ def lambda_handler(event, _):
         logging.error(f'Could not create S3 bucket resource using IAM role, exiting: {e}')
         return UNKNOWN_ERROR
 
-
-    input_code = event['path'][1:] ## strip off leading /
+    ## If path and API client are good, check input code
     http_response = check_code(input_code, codebank_object)
-
     logging.info(f'Sending HTTP response {http_response}, script complete.')
     return http_response

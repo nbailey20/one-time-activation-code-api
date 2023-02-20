@@ -5,6 +5,7 @@ import requests
 ## CHANGE ME TO CORRECT VALUES TO TEST ADDCODE API #########################################################
 hostname = ""                         ## Example: <API ID>.execute-api.us-east-1.amazonaws.com, NO /v1/!
 user_profile = "one-time-download"    ## profile name created during 'aws configure' command
+version = "offline"
 #############################################################################################################
 
 session = boto3.Session(profile_name=user_profile)
@@ -18,5 +19,5 @@ auth = AWSRequestsAuth(aws_access_key=credentials.access_key,
                        aws_region='us-east-1',
                        aws_service='execute-api')
 
-response = requests.get('https://'+hostname+'/v1/generate_code', auth=auth)
+response = requests.get(f'https://{hostname}/v1/{version}/generate_code', auth=auth)
 print(response.content.decode('ascii'))

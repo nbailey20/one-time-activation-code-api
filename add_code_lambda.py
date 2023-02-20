@@ -20,6 +20,7 @@ SUCCESS_CODE_ADD = {
 }
 
 CODE_LENGTH = 20
+CODEBANK_FILE_SUFFIX = 'codebank.json'
 
 
 ## Wrapper around AWS library methods to read/write to/from file in storage using provided API client
@@ -132,28 +133,31 @@ def lambda_handler(event, _):
 
     logging.info(f'Invoked AddCode API with event: {event}')
 
+    ## Expected path: /<version>/generate_code
+    path = event['path']
+    try:
+        version, action = path.split('/')[1:] ## strip off leading /
+        if action != 'generate_code':
+            return UNKNOWN_ROUTE
+    except:
+        logging.error(f'Received unexpected URL path, exiting: {path}')
+        return UNKNOWN_ROUTE
+
     ## Get environment variables needed for script
     try:
         bucket = os.environ['download_bucket']
-        codebank_name = 'codebank.json'
     except:
         logging.error('Could not retrieve environment variables needed for script, exiting')
         return UNKNOWN_ERROR
-    
 
     ## Create AWS storage API client with Lambda user creds to interact with codebank/game files
+    codebank_name = f'{version}-{CODEBANK_FILE_SUFFIX}'
     try:
         s3 = boto3.resource('s3')
         codebank_object = s3.Object(bucket, codebank_name)
-
     except ClientError as e:
-        logging.error(f'Could not create S3 bucket resource using IAM role, exiting: {e}')
+        logging.error(f'Could not create S3 API client using IAM role, exiting: {e}')
         return UNKNOWN_ERROR
 
-
-    ## If expected URL path, generate, save, return new valid code 
-    path = event['path'][1:] ## strip off leading /
-    if path == 'generate_code':
-        return add_new_code(codebank_object)
-    else:
-        return UNKNOWN_ROUTE
+    ## If path and API client are good, time to generate and save code
+    return add_new_code(codebank_object)
